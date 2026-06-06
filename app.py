@@ -1,167 +1,159 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
 
 
-def init_session_state():
-    """각 라디오 버튼(모드)별로 업로드된 파일 데이터를 독립적으로 유지하기 위한 세션 초기화"""
-    modes = [
-        "주식/경제 (327.8 | 321.91)",
-        "AI/컴퓨터과학 (004.73)",
-        "전쟁/정치/풍속 (340대 | 390대)",
-    ]
-
-    # 각 모드별 파일 데이터를 저장할 딕셔너리 세션 생성
-    if "mode_files" not in st.session_state:
-        st.session_state.mode_files = {mode: [] for mode in modes}
-
-
-def show_raw_text(file):
-    """업로드된 파일의 원본 내용을 텍스트로 접었다 펼 수 있게 보여주는 함수"""
+def load_data(uploaded_file, start_row):
+    """
+    업로드된 CSV 파일을 지정된 시작 행부터 읽어오는 함수 (인코딩: UTF-8)
+    """
+    skip_lines = max(0, start_row - 1)
     try:
-        file.seek(0)
-        raw_text = file.read().decode("utf-8-sig")
-        with st.expander(f"원본 파일 내용 확인 (텍스트) - {file.name}"):
-            st.text(raw_text)
-    except Exception as e:
-        st.error(f"원시 텍스트를 읽는 중 오류가 발생했습니다: {e}")
-
-
-def load_data(file, skip_rows):
-    """지정된 행부터 데이터를 읽어와 DataFrame으로 반환하는 함수"""
-    try:
-        file.seek(0)
-        df = pd.read_csv(file, encoding="utf-8-sig", skiprows=int(skip_rows) - 1)
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, skiprows=skip_lines, encoding='utf-8')
         return df
     except Exception as e:
-        st.error(f"{file.name} 파일을 읽는 중 오류가 발생했습니다: {e}")
+        st.error(f"{uploaded_file.name} 파일을 읽는 중 오류가 발생했습니다: {e}")
         return None
 
 
-def filter_data(df, file_name, mode):
-    """선택한 모드의 조건에 따라 I열 데이터를 필터링하는 함수"""
-    if df.shape[1] < 10:
-        st.error(f"{file_name} 데이터에 필요한 열(I열 또는 J열)이 존재하지 않습니다.")
-        return None
+def filter_books(df, mode):
+    """
+    선택된 모드(AI 또는 주식)에 따라 B 열(2번째 컬럼)에서 키워드를 필터링하는 함수
+    """
+    if df is None or df.shape[1] < 2:
+        return pd.DataFrame()
 
-    i_col = df.columns[8]
-
-    if mode == "주식/경제 (327.8 | 321.91)":
-        filtered_df = df[
-            df[i_col].astype(str).str.contains("327.8|321.91", na=False)
+    if mode == "AI 도서 추출":
+        keywords = [
+            '인공지능', 'AI', '챗GPT', 'ChatGPT', 'GPT',
+            '머신러닝', '딥러닝', '생성형 AI', '4차 산업혁명', 'LLM'
         ]
-    elif mode == "AI/컴퓨터과학 (004.73)":
-        filtered_df = df[df[i_col].astype(str).str.contains("004.73", na=False)]
     else:
-        # [수정 포인트] 정규표현식을 활용하여 340~349 및 390~399 범위 전체 포함
-        # 34[0-9]는 340부터 349까지, 39[0-9]는 390부터 399까지를 의미합니다.
-        filtered_df = df[
-            df[i_col].astype(str).str.contains("34[0-9]|39[0-9]", na=False)
+        keywords = [
+            '주식', '증권', '주가', '투자법', '재테크',
+            '매매', '단타', '차트', '가치투자', '공매도',
+            '배당주', '해외주식', '미국주식', 'ETF', '공모주'
         ]
+
+    b_col = df.columns[1]
+    pattern = '|'.join(keywords)
+    filtered_df = df[df[b_col].astype(str).str.contains(pattern, case=False, na=False)]
 
     return filtered_df
 
 
-# 메인 앱 로직
-def main():
-    st.title("도서 대출량 통합 분석 프로그램")
+def calculate_sum(df):
+    """
+    J 열(10번째 컬럼)의 합계를 계산하는 함수
+    """
+    if df is None or df.empty or df.shape[1] < 10:
+        return 0
 
-    # 세션 상태 초기화
-    init_session_state()
+    j_col = df.columns[9]
+    numeric_values = pd.to_numeric(df[j_col], errors='coerce').fillna(0)
+    return float(numeric_values.sum())
 
-    # 사이드바 라디오 버튼 (3번째 모드 이름 변경)
-    current_mode = st.sidebar.radio(
-        "분석 기능을 선택하세요",
-        [
-            "주식/경제 (327.8 | 321.91)",
-            "AI/컴퓨터과학 (004.73)",
-            "전쟁/정치/풍속 (340대 | 390대)",
-        ],
-    )
 
-    # 1. 데이터 시작 행 지정 (모드별 기본값 세팅)
-    default_row = 14 if current_mode == "주식/경제 (327.8 | 321.91)" else 13
-    start_row = st.number_input(
-        "데이터 시작 행 번호를 입력하세요",
-        min_value=1,
-        value=default_row,
-        step=1,
-    )
+# 메인 UI 설정
+st.title("도서 데이터 다중 추출 및 통계 프로그램")
 
-    # 2. 다중 파일 업로드
-    uploaded_files = st.file_uploader(
-        "CSV 파일들을 선택하세요",
-        type=["csv"],
-        accept_multiple_files=True,
-        key=f"uploader_{current_mode}",
-    )
+# 사이드바 설정 (라디오 버튼 및 시작 행)
+with st.sidebar:
+    st.header("설정 및 옵션")
+    program_mode = st.radio("분석 모드 선택", ["AI 도서 추출", "주식 도서 추출"])
+    start_row = st.number_input("데이터 시작 행 지정", min_value=1, value=14, step=1)
 
-    if uploaded_files:
-        st.session_state.mode_files[current_mode] = uploaded_files
+# 메인 화면 파일 업로드 (다중 파일)
+uploaded_files = st.file_uploader("월별 CSV 파일들을 업로드하세요.", type=["csv"], accept_multiple_files=True)
 
-    # 현재 선택된 모드에 보존되어 있는 파일 리스트 가져오기
-    files = st.session_state.mode_files.get(current_mode, [])
+# 세션 상태 초기화 (라디오 버튼 이동 시 데이터 유지)
+if "file_data_cache" not in st.session_state:
+    st.session_state.file_data_cache = {}
 
-    if files:
-        total_sum = 0.0
-        chart_data_dict = {"파일명": [], "J열 합계": []}
-
-        st.markdown("---")
-        st.subheader(f"[{current_mode}] 파일별 상세 분석 결과")
-
-        for file in files:
-            # 원본 파일 내용 확인 (텍스트 접기/펼치기)
-            show_raw_text(file)
-
-            # 지정행부터 데이터 로드 후 표로 표시
-            df = load_data(file, start_row)
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name not in st.session_state.file_data_cache:
+            df = load_data(uploaded_file, start_row)
             if df is not None:
-                with st.expander(f"시작 행 기준 전체 데이터 보기 - {file.name}"):
-                    st.dataframe(df)
+                st.session_state.file_data_cache[uploaded_file.name] = df
+else:
+    st.session_state.file_data_cache = {}
 
-                # 조건에 맞는 행 선택
-                filtered_df = filter_data(df, file.name, current_mode)
+# 그래프 및 통계를 위한 리스트
+stats_data = []
 
-                if filtered_df is not None:
-                    st.write(f"**{file.name}** (선택된 행: {len(filtered_df)}개)")
+if st.session_state.file_data_cache:
+    st.header(f"📊 {program_mode} 분석 결과")
 
-                    # 총 데이터 건수와 컬럼 목록 표시
-                    st.write(f"- 총 데이터 건수: **{len(filtered_df)}** 건")
-                    st.write(f"- 컬럼 목록: `{list(filtered_df.columns)}`")
+    for file_name, df in st.session_state.file_data_cache.items():
+        filtered_df = filter_books(df, program_mode)
+        total_sum = calculate_sum(filtered_df)
+        row_count = len(filtered_df)
 
-                    # 선정된 최종 데이터 표시 및 J열 합산
-                    if not filtered_df.empty:
-                        st.write("선정된 최종 데이터")
-                        st.dataframe(filtered_df)
+        stats_data.append({
+            "파일명": file_name,
+            "J열 합계": total_sum,
+            "추출 건수": row_count
+        })
 
-                        j_col = df.columns[9]
-                        j_values = pd.to_numeric(
-                            filtered_df[j_col], errors="coerce"
-                        ).fillna(0)
-                        file_sum = float(j_values.sum())
-                    else:
-                        st.info("조건에 일치하는 행이 없습니다.")
-                        file_sum = 0.0
+        st.markdown(f"---")
+        st.subheader(f"파일: {file_name}")
+        st.write(f"추출된 데이터 건수: {row_count} 건")
+        st.dataframe(filtered_df)
+        st.write(f"해당 파일 J열 합계: {total_sum}")
 
-                    st.write(f"- 해당 파일 J열 합계: {file_sum:,.2f}")
-                    st.markdown("---")
+    # Plotly를 이용한 다중 축 복합 차트 생성 (막대그래프 + 추세선)
+    if stats_data:
+        st.markdown("---")
+        st.subheader(f"📈 {program_mode} 월별 통계 및 추세선 그래프")
 
-                    # 그래프 및 최종 합산용 데이터 축적
-                    total_sum += file_sum
-                    chart_data_dict["파일명"].append(file.name)
-                    chart_data_dict["J열 합계"].append(file_sum)
+        chart_df = pd.DataFrame(stats_data)
 
-        # 3. 현재 모드의 전체 파일 최종 총합 표시
-        st.subheader("전체 분석 결과")
-        st.write(
-            f"현재 모드에서 조건에 맞는 행의 J열 최종 총합: **{total_sum:,.2f}**"
+        fig = go.Figure()
+
+        # 1. J열 합계 막대그래프 추가 (기본 왼쪽 y축)
+        fig.add_trace(go.Bar(
+            x=chart_df["파일명"],
+            y=chart_df["J열 합계"],
+            name="J열 합계 (막대)",
+            marker_color="rgb(31, 119, 180)",
+            yaxis="y1"
+        ))
+
+        # 2. 추출 건수 추세선 추가 (우측 보조 y축 사용)
+        fig.add_trace(go.Scatter(
+            x=chart_df["파일명"],
+            y=chart_df["추출 건수"],
+            name="추출 건수 (추세선)",
+            mode="lines+markers",
+            line=dict(color="rgb(255, 127, 14)", width=3),
+            yaxis="y2"
+        ))
+
+        # 레이아웃 설정 (최신 Plotly title 표준 가이드 반영)
+        fig.update_layout(
+            xaxis=dict(title="파일명"),
+            yaxis=dict(
+                title=dict(
+                    text="J열 합계",
+                    font=dict(color="rgb(31, 119, 180)")
+                ),
+                tickfont=dict(color="rgb(31, 119, 180)")
+            ),
+            yaxis2=dict(
+                title=dict(
+                    text="추출 건수 (행의 수)",
+                    font=dict(color="rgb(255, 127, 14)")
+                ),
+                tickfont=dict(color="rgb(255, 127, 14)"),
+                overlaying="y",
+                side="right"
+            ),
+            legend=dict(x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.5)"),
+            margin=dict(l=40, r=40, t=40, b=40),
+            hovermode="x unified"
         )
 
-        # 4. 파일별 합계 비교 막대그래프 출력
-        if chart_data_dict["파일명"]:
-            st.subheader("파일별 합계 비교 시각화")
-            chart_df = pd.DataFrame(chart_data_dict)
-            st.bar_chart(data=chart_df, x="파일명", y="J열 합계")
-
-
-if __name__ == "__main__":
-    main()
+        # Streamlit 화면에 Plotly 차트 출력
+        st.plotly_chart(fig, use_container_width=True)
